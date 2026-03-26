@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Planilha Master — Rondônia</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -3044,6 +3045,7 @@ function renderAdmin(){
       <button class="tab ${admTab==='users'?'on':''}" onclick="admSetTab('users')">👤 Usuários (${users.length})</button>
       <button class="tab ${admTab==='logs'?'on':''}" onclick="admSetTab('logs')">📋 Logs de Atividade</button>
       <button class="tab ${admTab==='backup'?'on':''}" onclick="admSetTab('backup')">💾 Backup</button>
+      <button class="tab ${admTab==='import'?'on':''}" onclick="admSetTab('import')">📊 Importar Planilha</button>
     </div>
     <div id="adm-content"></div>`;
   admRenderContent();
@@ -3055,6 +3057,7 @@ function admRenderContent(){
   if(!el)return;
   if(admTab==='users')admRenderUsers(el);
   else if(admTab==='backup')admRenderBackup(el);
+  else if(admTab==='import')admRenderImport(el);
   else admRenderLogs(el);
 }
 
@@ -3384,7 +3387,287 @@ function admRenderBackup(el){
     </div>`;
 }
 
+// ── XLSX IMPORT ──────────────────────────────────────────────────────────────
+// Maps spreadsheet sheets to the right internal data structures.
+
+const XLSX_POLS_SHEETS = {
+  'PREFEITOS':       { tipo:'Prefeito',       headerRows:2 },
+  'VICE_PREFEITOS':  { tipo:'Vice-Prefeito',  headerRows:2 },
+  'VEREADORES':      { tipo:'Vereador',       headerRows:2 },
+  'DEP_ESTADUAL':    { tipo:'Dep. Estadual',  headerRows:2 },
+  'DEP_FEDERAL':     { tipo:'Dep. Federal',   headerRows:2 },
+  'LIDERANÇAS':      { tipo:'Liderança',      headerRows:1 },
+  'SENADORES':       { tipo:'Senador',        headerRows:4 },
+  'SECRETÁRIOS':     { tipo:'Secretário',     headerRows:1 },
+  'OUTRAS PESSOAS ': { tipo:'Outras Pessoas', headerRows:1 },
+};
+
+// Spreadsheet column name → POLS field name
+const XLSX_POL_COL = {
+  'ID_PESSOAS':'ID_PESSOAS', 'MUNICIPIO':'MUNICIPIO',
+  'NOME COMPLETO':'NOME', 'NOME':'NOME',
+  'NOME ELEITORAL':'NOME_ELEITORAL',
+  'PARTIDO':'PARTIDO', 'APOIO':'APOIO', 'APOIADOR':'APOIO',
+  'TIPO APOIO':'NIVEL_APOIO', 'NIVEL_APOIO_MAURICIO':'NIVEL_APOIO', 'NIVEL_APOIO':'NIVEL_APOIO',
+  'COMENTARIO APOIO':'COMENTARIO', 'COMENTÁTIO APOIO':'COMENTARIO', 'COMENTÁRIO APOIO':'COMENTARIO',
+  'Nº VOTOS':'Nº VOTOS', 'SITUACAO':'SITUACAO',
+  'EMAIL':'EMAIL', 'TELEFONE':'TELEFONE', 'TELEFONE ':'TELEFONE',
+  'REDE SOCIAL':'REDE_SOCIAL',
+  'PROFISSÃO':'PROFISSAO',
+  'DATA DE NASCIMENTO':'DATA_NASC', 'DATA DE NASCIMEMTO':'DATA_NASC', 'DATA_NASCIMENTO':'DATA_NASC',
+  'CARGO ':'CARGO', 'CARGO':'CARGO', 'CARGO_ATUAL':'CARGO', 'TIPO_LIDERANCA':'CARGO',
+};
+
+function _xlsxFmt(v) {
+  if(v == null) return null;
+  if(v instanceof Date) return v.toISOString().slice(0,10);
+  if(typeof v === 'number') return v;
+  const s = String(v).trim();
+  return s === '' ? null : s;
+}
+
+function _xlsxSheetToRows(sheet, skipRows) {
+  const json = XLSX.utils.sheet_to_json(sheet, {header:1, defval:null, raw:false, dateNF:'yyyy-mm-dd'});
+  if(json.length <= skipRows) return {headers:[], rows:[]};
+  const headers = (json[skipRows - 1] || []).map(h => h == null ? null : String(h).trim());
+  const rows = json.slice(skipRows);
+  return {headers, rows};
+}
+
+function _xlsxParseDB(sheet, skipRows) {
+  const {headers, rows} = _xlsxSheetToRows(sheet, skipRows);
+  return rows
+    .filter(r => r.some(c => c != null))
+    .map((r, idx) => {
+      const rec = {_id: idx};
+      headers.forEach((h, i) => { if(h) rec[h] = _xlsxFmt(r[i]); });
+      return rec;
+    });
+}
+
+function _xlsxParsePols(sheet, tipo, headerRows) {
+  const {headers, rows} = _xlsxSheetToRows(sheet, headerRows);
+  const photoIdx = headers.indexOf('FOTO');
+  return rows
+    .filter(r => r.some(c => c != null))
+    .map((r, idx) => {
+      const rec = {_id: idx, TIPO: tipo, _foto: null, _origem: tipo.toLowerCase().replace(/[^a-z]/g,'')};
+      headers.forEach((h, i) => {
+        if(!h || h === 'FOTO') return;
+        const field = XLSX_POL_COL[h];
+        if(field) rec[field] = _xlsxFmt(r[i]);
+      });
+      // Fill missing standard fields with null
+      ['ID_PESSOAS','MUNICIPIO','NOME','NOME_ELEITORAL','PARTIDO','APOIO','NIVEL_APOIO',
+       'Nº VOTOS','SITUACAO','TELEFONE','EMAIL','PROFISSAO','CARGO','MANDATO',
+       'COMENTARIO','REDE_SOCIAL','DATA_NASC'].forEach(f => { if(!(f in rec)) rec[f]=null; });
+      return rec;
+    })
+    .filter(r => r.ID_PESSOAS || r.NOME);
+}
+
+let _xlsxPreview = null; // parsed data waiting for user confirmation
+
+function xlsxImport(event) {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if(!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  if(!['xlsx','xls','ods','csv'].includes(ext)) { toast('Formato não suportado. Use .xlsx ou .xls','err'); return; }
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const wb = XLSX.read(e.target.result, {type:'array', cellDates:true, dateNF:'yyyy-mm-dd'});
+      const parsed = {emendas:[], solicitacoes:[], municipios:[], resumo:[], pols:[]};
+      let polId = 0;
+
+      // ── DB sheets ──
+      if(wb.SheetNames.includes('EMENDAS'))
+        parsed.emendas = _xlsxParseDB(wb.Sheets['EMENDAS'], 1);
+      if(wb.SheetNames.includes('SOLICITACOES'))
+        parsed.solicitacoes = _xlsxParseDB(wb.Sheets['SOLICITACOES'], 1);
+      if(wb.SheetNames.includes('MUNICIPIOS'))
+        parsed.municipios = _xlsxParseDB(wb.Sheets['MUNICIPIOS'], 1);
+      if(wb.SheetNames.includes('RESUMO POR MUNICIPIO'))
+        parsed.resumo = _xlsxParseDB(wb.Sheets['RESUMO POR MUNICIPIO'], 2);
+
+      // ── POLS sheets ──
+      Object.entries(XLSX_POLS_SHEETS).forEach(([sname, cfg]) => {
+        // Try both exact name and trimmed version
+        const sheetKey = wb.SheetNames.find(n => n.trim() === sname.trim());
+        if(!sheetKey) return;
+        const recs = _xlsxParsePols(wb.Sheets[sheetKey], cfg.tipo, cfg.headerRows);
+        recs.forEach(r => { r._id = polId++; parsed.pols.push(r); });
+      });
+
+      // Merge photos from existing POLS
+      const existingByID = {};
+      POLS.forEach(p => { if(p.ID_PESSOAS) existingByID[p.ID_PESSOAS] = p._foto || null; });
+      parsed.pols.forEach(p => {
+        if(p.ID_PESSOAS && existingByID[p.ID_PESSOAS]) p._foto = existingByID[p.ID_PESSOAS];
+      });
+
+      _xlsxPreview = parsed;
+
+      // Render preview
+      const el = document.getElementById('xlsx-preview');
+      if(!el) return;
+      const total = parsed.emendas.length + parsed.solicitacoes.length + parsed.municipios.length + parsed.resumo.length + parsed.pols.length;
+      const polsByTipo = {};
+      parsed.pols.forEach(p => { polsByTipo[p.TIPO] = (polsByTipo[p.TIPO]||0)+1; });
+      el.innerHTML = `
+        <div style="background:var(--green-d);border:1px solid rgba(63,185,80,.3);border-radius:var(--r);padding:14px 16px;margin-bottom:14px">
+          <div style="font-size:13px;font-weight:600;color:var(--green);margin-bottom:8px">✅ Planilha lida com sucesso — ${total.toLocaleString('pt-BR')} registros encontrados</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px">
+            ${[
+              {l:'Emendas',     n:parsed.emendas.length,     c:'var(--blue)'},
+              {l:'Solicitações',n:parsed.solicitacoes.length, c:'var(--purple)'},
+              {l:'Municípios',  n:parsed.municipios.length,   c:'var(--teal)'},
+              {l:'Resumo',      n:parsed.resumo.length,       c:'var(--amber)'},
+              ...Object.entries(polsByTipo).map(([t,n]) => ({l:t, n, c:'var(--green)'}))
+            ].map(x=>`<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 10px">
+              <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.06em">${esc(x.l)}</div>
+              <div style="font-size:20px;font-weight:700;color:${x.c};font-family:var(--mono)">${x.n}</div>
+            </div>`).join('')}
+          </div>
+        </div>
+        <div style="background:var(--amber-d);border:1px solid rgba(210,153,34,.3);border-radius:var(--r);padding:12px 14px;font-size:12px;color:var(--amber);margin-bottom:14px">
+          ⚠️ Ao confirmar, os dados atuais de Emendas, Solicitações, Municípios e Pessoas serão substituídos pelos dados da planilha. Fotos cadastradas serão preservadas.
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="xlsxApply()">✅ Confirmar Importação</button>
+          <button class="btn" onclick="xlsxCancelPreview()">Cancelar</button>
+        </div>`;
+    } catch(err) {
+      toast('Erro ao ler a planilha: ' + err.message, 'err');
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function xlsxApply() {
+  if(!_xlsxPreview) return;
+  const p = _xlsxPreview;
+
+  // Replace DB arrays in place
+  ['emendas','solicitacoes','municipios','resumo'].forEach(k => {
+    if(p[k] && p[k].length) {
+      DB[k].length = 0;
+      p[k].forEach(r => DB[k].push(r));
+    }
+  });
+
+  // Replace POLS array in place
+  if(p.pols && p.pols.length) {
+    POLS.length = 0;
+    p.pols.forEach(r => POLS.push(r));
+    window.POLS_DATA = POLS;
+  }
+
+  // Persist to localStorage (best-effort)
+  try {
+    localStorage.setItem('XLSX_IMPORT_DB', JSON.stringify({
+      emendas: DB.emendas, solicitacoes: DB.solicitacoes,
+      municipios: DB.municipios, resumo: DB.resumo,
+    }));
+    localStorage.setItem('XLSX_IMPORT_POLS', JSON.stringify(POLS));
+    localStorage.setItem('XLSX_IMPORT_TS', new Date().toISOString());
+  } catch(e) { /* storage full - skip */ }
+
+  _xlsxPreview = null;
+
+  // Re-render all active views
+  updateBadges();
+  rebuildDashboard();
+  const cur = document.querySelector('.page.active')?.id?.replace('page-','');
+  if(cur && cur !== 'admin') goto(cur);
+  goto('admin');
+  admSetTab('import');
+  toast('Planilha importada com sucesso! ' + p.pols.length + ' pessoas, ' + p.emendas.length + ' emendas, ' + p.solicitacoes.length + ' solicitações.');
+}
+
+function xlsxCancelPreview() {
+  _xlsxPreview = null;
+  const el = document.getElementById('xlsx-preview');
+  if(el) el.innerHTML = '';
+}
+
+function xlsxClearImport() {
+  if(!confirm('Limpar dados importados e voltar aos dados originais da planilha embutida?')) return;
+  localStorage.removeItem('XLSX_IMPORT_DB');
+  localStorage.removeItem('XLSX_IMPORT_POLS');
+  localStorage.removeItem('XLSX_IMPORT_TS');
+  toast('Dados limpos. Recarregando…');
+  setTimeout(() => location.reload(), 1200);
+}
+
+function xlsxLoadFromStorage() {
+  try {
+    const rawDB = localStorage.getItem('XLSX_IMPORT_DB');
+    const rawPols = localStorage.getItem('XLSX_IMPORT_POLS');
+    if(!rawDB && !rawPols) return;
+    if(rawDB) {
+      const saved = JSON.parse(rawDB);
+      ['emendas','solicitacoes','municipios','resumo'].forEach(k => {
+        if(saved[k] && saved[k].length) {
+          DB[k].length = 0;
+          saved[k].forEach(r => DB[k].push(r));
+        }
+      });
+    }
+    if(rawPols) {
+      const savedPols = JSON.parse(rawPols);
+      POLS.length = 0;
+      savedPols.forEach(r => POLS.push(r));
+      window.POLS_DATA = POLS;
+    }
+  } catch(e) { /* corrupted data */ }
+}
+
+function admRenderImport(el) {
+  const ts = localStorage.getItem('XLSX_IMPORT_TS');
+  const hasImport = !!ts;
+  el.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--rl);padding:24px;max-width:700px">
+      <div style="font-size:15px;font-weight:700;margin-bottom:6px">📊 Importar Planilha Master</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:20px;line-height:1.6">
+        Faça upload da <strong>Planilha Master (.xlsx)</strong> para atualizar automaticamente os dados de Emendas, Solicitações, Municípios, Prefeitos, Vereadores, Deputados e demais pessoas cadastradas no sistema.<br>
+        <span style="color:var(--text3)">Abas suportadas: EMENDAS · SOLICITACOES · MUNICIPIOS · RESUMO POR MUNICIPIO · PREFEITOS · VICE_PREFEITOS · VEREADORES · DEP_ESTADUAL · DEP_FEDERAL · LIDERANÇAS · SENADORES · SECRETÁRIOS · OUTRAS PESSOAS</span>
+      </div>
+
+      ${hasImport ? `<div style="background:var(--blue-d);border:1px solid rgba(56,139,253,.25);border-radius:var(--r);padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--blue)">
+        ℹ️ Última importação: <strong>${new Date(ts).toLocaleString('pt-BR')}</strong>
+        <button class="btn btn-sm btn-danger" onclick="xlsxClearImport()" style="margin-left:10px">🗑 Limpar e restaurar originais</button>
+      </div>` : ''}
+
+      <div class="anexo-zone" id="xlsx-drop-zone" style="margin-bottom:16px">
+        <div class="anexo-zone-icon">📄</div>
+        <div class="anexo-zone-text">Clique ou arraste a Planilha Master aqui</div>
+        <div class="anexo-zone-hint">Formatos aceitos: .xlsx · .xls · .ods</div>
+      </div>
+      <input type="file" id="xlsx-file-input" accept=".xlsx,.xls,.ods" style="display:none" onchange="xlsxImport(event)">
+
+      <div id="xlsx-preview"></div>
+    </div>`;
+
+  // Wire drag-and-drop
+  const zone = document.getElementById('xlsx-drop-zone');
+  if(zone) {
+    zone.addEventListener('click', () => document.getElementById('xlsx-file-input').click());
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+    zone.addEventListener('drop', e => {
+      e.preventDefault(); zone.classList.remove('drag-over');
+      const files = e.dataTransfer.files;
+      if(files.length) xlsxImport({target:{files, value:''}, preventDefault:()=>{}});
+    });
+  }
+}
+
 // ── INIT ─────────────────────────────────────────────────────────────────────
+xlsxLoadFromStorage();
 updateBadges();
 buildDashboard();
 updateCurrentUserWidget();
