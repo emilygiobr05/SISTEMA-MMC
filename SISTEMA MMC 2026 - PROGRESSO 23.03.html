@@ -3429,6 +3429,21 @@ function _xlsxFmt(v) {
   return s === '' ? null : s;
 }
 
+// Columns that must be stored as numbers (SheetJS raw:false returns them as strings)
+const XLSX_NUM_COLS = new Set([
+  'VALOR','ANO_EMENDA','ANO',
+  'POPULACAO','Nº ELEITORES','TOTAL VEREADORES','VEREADORES REELEITOS','VOTOS PREFEITO',
+  'PROJECAO_VOTOS_MARIANA_2026','PROJECAO_VOTOS_MAURICIO_2026',
+  'VOTOS_MARIANA_2014','VOTOS_MARIANA_2018','VOTOS_MARIANA_2022','VOTOS_MAURICIO_2022',
+  'Nº VOTOS'
+]);
+function _xlsxNum(h, v) {
+  if(!XLSX_NUM_COLS.has(h) || v == null) return v;
+  if(typeof v === 'number') return v;
+  const n = parseFloat(String(v).replace(/,/g, ''));
+  return isNaN(n) ? v : n;
+}
+
 function _xlsxSheetToRows(sheet, skipRows) {
   const json = XLSX.utils.sheet_to_json(sheet, {header:1, defval:null, raw:false, dateNF:'yyyy-mm-dd'});
   if(json.length <= skipRows) return {headers:[], rows:[]};
@@ -3443,7 +3458,7 @@ function _xlsxParseDB(sheet, skipRows) {
     .filter(r => r.some(c => c != null))
     .map((r, idx) => {
       const rec = {_id: idx};
-      headers.forEach((h, i) => { if(h) rec[h] = _xlsxFmt(r[i]); });
+      headers.forEach((h, i) => { if(h) rec[h] = _xlsxNum(h, _xlsxFmt(r[i])); });
       return rec;
     });
 }
@@ -3458,7 +3473,7 @@ function _xlsxParsePols(sheet, tipo, headerRows) {
       headers.forEach((h, i) => {
         if(!h || h === 'FOTO') return;
         const field = XLSX_POL_COL[h];
-        if(field) rec[field] = _xlsxFmt(r[i]);
+        if(field) rec[field] = _xlsxNum(field, _xlsxFmt(r[i]));
       });
       // Fill missing standard fields with null
       ['ID_PESSOAS','MUNICIPIO','NOME','NOME_ELEITORAL','PARTIDO','APOIO','NIVEL_APOIO',
