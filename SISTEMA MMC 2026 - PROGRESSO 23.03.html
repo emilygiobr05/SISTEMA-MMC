@@ -172,6 +172,22 @@ tbody td{padding:8px 11px;vertical-align:middle}
 .photo-prev{width:58px;height:58px;border-radius:8px;object-fit:cover;border:1px solid var(--border2);flex-shrink:0}
 .photo-prev-ph{width:58px;height:58px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px;background:var(--bg4);border:1px solid var(--border);flex-shrink:0}
 
+/* ── ANEXOS (file upload) ── */
+.anexo-zone{border:2px dashed var(--border2);border-radius:var(--r);padding:18px 14px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s;background:var(--bg3)}
+.anexo-zone:hover,.anexo-zone.drag-over{border-color:var(--blue);background:var(--blue-d)}
+.anexo-zone-icon{font-size:28px;margin-bottom:6px}
+.anexo-zone-text{font-size:12px;color:var(--text2);line-height:1.5}
+.anexo-zone-hint{font-size:10px;color:var(--text3);margin-top:3px}
+.anexo-list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.anexo-item{display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);font-size:12px}
+.anexo-item-icon{font-size:16px;flex-shrink:0}
+.anexo-item-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.anexo-item-size{color:var(--text3);font-size:11px;flex-shrink:0}
+.anexo-item-del{cursor:pointer;color:var(--red);font-size:14px;flex-shrink:0;background:none;border:none;padding:0 2px;line-height:1}
+.anexo-item-del:hover{color:#ff6b6b}
+.anexo-view-link{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:5px;background:var(--bg3);border:1px solid var(--border);font-size:11px;color:var(--blue);cursor:pointer;text-decoration:none}
+.anexo-view-link:hover{background:var(--bg4)}
+
 /* ── MISC ── */
 .empty{padding:40px;text-align:center;color:var(--text3);font-size:13px}
 .pb{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden}
@@ -632,6 +648,7 @@ function resetPST(){PST.q='';PST.tipo='';PST.apoio='';PST.municipio='';PST.pg=1;
 
 // ── POLITICIAN CRUD ───────────────────────────────────────────────────────────
 let mRec=null, mMode=null, pendingPhoto=null;
+let pendingAnexos=[]; // [{name,size,type,data}] for solicitation file uploads
 
 const POL_FIELDS = [
   {k:'TIPO',l:'Cargo',opts:Object.keys(TIPO_COLOR)},
@@ -1382,6 +1399,19 @@ function viewSol(id) {
     const v=r[k];if(!v)return'';
     return `<tr><td style="vertical-align:top;white-space:nowrap">${esc(k)}</td><td style="white-space:pre-wrap;font-size:12px;line-height:1.6;color:var(--text2)">${esc(String(v).slice(0,600))}${String(v).length>600?'…':''}</td></tr>`;
   }).join('');
+  const anexos=r._anexos||[];
+  const anexosHtml=anexos.length?`
+    <div style="margin-top:16px">
+      <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--blue);padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:8px">Anexos (${anexos.length})</div>
+      <div class="anexo-list">${anexos.map((a,i)=>`
+        <div class="anexo-item">
+          <span class="anexo-item-icon">${_anexoIcon(a.type||'')}</span>
+          <span class="anexo-item-name" title="${esc(a.name)}">${esc(a.name)}</span>
+          <span class="anexo-item-size">${_fmtBytes(a.size||0)}</span>
+          <a class="anexo-view-link" href="${esc(a.data)}" download="${esc(a.name)}" onclick="event.stopPropagation()">⬇ Baixar</a>
+        </div>`).join('')}
+      </div>
+    </div>`:'';
   document.getElementById('modal-title').textContent=r.ID_SOLICITACAO||'Solicitação';
   document.getElementById('modal-body').innerHTML=`
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
@@ -1390,7 +1420,8 @@ function viewSol(id) {
     </div>
     <div style="font-size:18px;font-weight:700;letter-spacing:-.02em;margin-bottom:4px">${esc(r.NOME_SOLICITANTE||'—')}</div>
     <div style="font-size:13px;color:var(--text2);margin-bottom:16px">${esc(r.MUNICIPIO||'')}</div>
-    <table class="info-tbl"><tbody>${rows}${longRows}</tbody></table>`;
+    <table class="info-tbl"><tbody>${rows}${longRows}</tbody></table>
+    ${anexosHtml}`;
   document.getElementById('modal-foot').innerHTML=`
     <button class="btn" onclick="closeModal()">Fechar</button>
     <button class="btn btn-primary" onclick="closeModal();editGeneric('solicitacoes',${id})">✏️ Editar</button>`;
@@ -1774,6 +1805,8 @@ const SOL_FIELDS = [
 ];
 
 function buildSolicitacaoForm(rec) {
+  // Seed pendingAnexos with existing attachments when editing
+  pendingAnexos = (rec?._anexos || []).map(a=>({...a}));
   let html = '<div class="form-grid">';
   SOL_FIELDS.forEach(f => {
     if(f.section) {
@@ -1793,6 +1826,19 @@ function buildSolicitacaoForm(rec) {
     }
     html += `<div class="fg${f.long?' s2':''}"><label class="form-label">${esc(f.l)}</label>${inp}</div>`;
   });
+  // ── Anexos section ──────────────────────────────────────────────────────────
+  html += `<div class="fg s2" style="padding-top:4px">
+    <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--blue);padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:2px">Anexos / Documentos</div>
+  </div>
+  <div class="fg s2">
+    <div class="anexo-zone" id="anexo-drop-zone">
+      <div class="anexo-zone-icon">📁</div>
+      <div class="anexo-zone-text">Clique ou arraste arquivos aqui</div>
+      <div class="anexo-zone-hint">Fotos, PDFs, documentos e outros • máx. 10 MB por arquivo</div>
+    </div>
+    <input type="file" id="anexo-file-input" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip,.rar" style="display:none" onchange="handleAnexo(event)">
+    <div class="anexo-list" id="anexo-list"></div>
+  </div>`;
   html += '</div>';
   return html;
 }
@@ -1881,11 +1927,12 @@ function buildEmendaForm(rec) {
 }
 
 function openCreate(){
-  mGenPage=curPage; mGenRec=null; mMode='generic'; pendingPhoto=null;
+  mGenPage=curPage; mGenRec=null; mMode='generic'; pendingPhoto=null; pendingAnexos=[];
   document.getElementById('modal-title').textContent=({emendas:'Nova emenda',solicitacoes:'Nova solicitação'}[curPage]||'Novo registro');
   document.getElementById('modal-body').innerHTML=buildGenForm(curPage,{});
   document.getElementById('modal-foot').innerHTML=`<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="saveRecord()">Salvar</button>`;
   document.getElementById('modal').classList.add('open');
+  if(curPage==='solicitacoes'){setupAnexoZone('anexo-drop-zone','anexo-file-input');renderAnexoList();}
 }
 function editGeneric(p,id){
   mGenPage=p; mGenRec=DB[p].find(r=>r._id===id); mMode='generic'; pendingPhoto=null;
@@ -1893,10 +1940,12 @@ function editGeneric(p,id){
   document.getElementById('modal-body').innerHTML=buildGenForm(p,mGenRec);
   document.getElementById('modal-foot').innerHTML=`<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="saveRecord()">Salvar</button>`;
   document.getElementById('modal').classList.add('open');
+  if(p==='solicitacoes'){setupAnexoZone('anexo-drop-zone','anexo-file-input');renderAnexoList();}
 }
 function saveGenericRecord(){
   const inputs=document.querySelectorAll('#modal-body [data-key]');
   const rec={};inputs.forEach(el=>{rec[el.dataset.key]=el.value||null;});
+  if(mGenPage==='solicitacoes') rec._anexos=pendingAnexos.slice();
   if(mGenRec){Object.assign(DB[mGenPage].find(r=>r._id===mGenRec._id),rec);toast('Atualizado!');}
   else{const nid=Math.max(0,...DB[mGenPage].map(r=>r._id))+1;DB[mGenPage].push({...rec,_id:nid});toast('Criado!');}
   closeModal(); renderTable(mGenPage); updateBadges();
@@ -1921,8 +1970,68 @@ function handlePhoto(e){
   reader.readAsDataURL(file); e.target.value='';
 }
 
+// ── ANEXOS (solicitation file upload) ─────────────────────────────────────────
+function _anexoIcon(type){
+  if(type.startsWith('image/')) return '🖼️';
+  if(type==='application/pdf') return '📄';
+  if(type.includes('word')) return '📝';
+  if(type.includes('spreadsheet')||type.includes('excel')) return '📊';
+  if(type.includes('zip')||type.includes('rar')||type.includes('7z')) return '🗜️';
+  return '📎';
+}
+function _fmtBytes(b){
+  if(b<1024)return b+'B';
+  if(b<1048576)return (b/1024).toFixed(1)+'KB';
+  return (b/1048576).toFixed(1)+'MB';
+}
+function handleAnexo(e){
+  const files=Array.from(e.target.files);
+  const MAX=10485760; // 10 MB per file
+  files.forEach(file=>{
+    if(file.size>MAX){toast(`"${file.name}" excede 10 MB.`,'err');return;}
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      pendingAnexos.push({name:file.name,size:file.size,type:file.type,data:ev.target.result});
+      renderAnexoList();
+    };
+    reader.readAsDataURL(file);
+  });
+  e.target.value='';
+}
+function removeAnexo(idx){
+  pendingAnexos.splice(idx,1);
+  renderAnexoList();
+}
+function renderAnexoList(){
+  const container=document.getElementById('anexo-list');
+  if(!container)return;
+  if(!pendingAnexos.length){container.innerHTML='';return;}
+  container.innerHTML=pendingAnexos.map((a,i)=>`
+    <div class="anexo-item">
+      <span class="anexo-item-icon">${_anexoIcon(a.type)}</span>
+      <span class="anexo-item-name" title="${esc(a.name)}">${esc(a.name)}</span>
+      <span class="anexo-item-size">${_fmtBytes(a.size)}</span>
+      <button class="anexo-item-del" onclick="removeAnexo(${i})" title="Remover">✕</button>
+    </div>`).join('');
+}
+function setupAnexoZone(zoneId,inputId){
+  const zone=document.getElementById(zoneId);
+  if(!zone)return;
+  zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('drag-over');});
+  zone.addEventListener('dragleave',()=>zone.classList.remove('drag-over'));
+  zone.addEventListener('drop',e=>{
+    e.preventDefault(); zone.classList.remove('drag-over');
+    const dt=e.dataTransfer;
+    if(dt&&dt.files.length){
+      const fake={target:{files:dt.files,value:''}};
+      handleAnexo(fake);
+    }
+  });
+  zone.addEventListener('click',()=>document.getElementById(inputId)&&document.getElementById(inputId).click());
+}
+
 // ── MODAL ────────────────────────────────────────────────────────────────────
-function closeModal(){document.getElementById('modal').classList.remove('open');pendingPhoto=null;}
+function closeModal(){document.getElementById('modal').classList.remove('open');pendingPhoto=null;pendingAnexos=[];}
 
 // ── BADGES ───────────────────────────────────────────────────────────────────
 function updateBadges(){
