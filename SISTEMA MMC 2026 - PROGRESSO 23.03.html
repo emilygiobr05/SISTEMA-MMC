@@ -3445,7 +3445,7 @@ function _xlsxNum(h, v) {
 }
 
 function _xlsxSheetToRows(sheet, skipRows) {
-  const json = XLSX.utils.sheet_to_json(sheet, {header:1, defval:null, raw:false, dateNF:'yyyy-mm-dd'});
+  const json = XLSX.utils.sheet_to_json(sheet, {header:1, defval:null, raw:true});
   if(json.length <= skipRows) return {headers:[], rows:[]};
   const headers = (json[skipRows - 1] || []).map(h => h == null ? null : String(h).trim());
   const rows = json.slice(skipRows);
